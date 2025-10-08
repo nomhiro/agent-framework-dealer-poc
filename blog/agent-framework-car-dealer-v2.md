@@ -5,14 +5,36 @@ author: Your Name
 tags: [Microsoft Agent Framework, MCP, Azure Functions, Multi-Agent, Python, AI]
 ---
 
-# Microsoft Agent Framework × Azure Functions MCPサーバ の実装トライ！
-## 動かしたもの
+# はじめに
+2025年10月に、MicrosoftからAgent Frameworkがリリースされました。従来、Microsoft関連のAIオーケストレーター層としてSemanticKernelとAutoGenがありました。これらを統合したFrameworkです。
+https://learn.microsoft.com/ja-jp/agent-framework/overview/agent-framework-overview
+
+概要について、詳しくはMicrosoftのdaka-sanのブログ記事をご覧ください。
+https://zenn.dev/microsoft/articles/f0a05ba54a5df4
+
+このブログでは、Azure Functions で MCPサーバを構築し、それらのツールを接続した、マルチエージェントな仕組みを、Microsoft Agent Frameworkで実装してみたので、その内容を紹介します。
+
+# 動かしたもの
 
 自動車購入を検討しているユーザーに対して、**車種提案 → 見積作成 → 与信審査 → 予約管理**まで対話形式で自動対応するマルチエージェントなシステムです。
 各エージェントは、既存システムのAPIをMCPサーバ化したツールを呼び出して協調動作します。
 ※APIは仮実装であり、車両データや月額料金なども架空の設定です。
 
-### 🎬 実行例
+## 🎬 実行例
+このような流れで動作します。
+1. ユーザーが車の要件を入力します。
+2. OrchestratorAgentが要件を解析し、各エージェントに処理を依頼します。
+3. まず最初にProposalAgentが提案を作成します。
+   1.  提案のために必要な車種リストをMCPツールから取得
+   2.  車種リストとユーザ要件をもとに、推薦車種を絞り込み
+   3.  ユーザに提案内容を返却
+4.  次に、QuotationAgentが見積を作成します。
+   1.  推薦車種の納期をMCPツールから取得
+   2.  推薦車種の月額料金をMCPツールから取得
+5.  最後に、FinanceAdvisorAgentが与信審査を行います。
+   1.  ユーザーの年収・借入額をユーザにヒアリング
+   2.  与信スコアをMCPツールから取得
+   3.  契約可否をユーザに返却
 
 ```powershell
 PS> python .\orchestrator_chat_repl.py --query "ワンボックスほど大きくない、スライドドアの車がいいなー" --budget-max=6000000 --verbose
@@ -66,11 +88,12 @@ PS> python .\orchestrator_chat_repl.py --query "ワンボックスほど大き�
 新しい借入額での与信審査は無事に承認されました！トヨタのSIENTA、借入額100万円でのお手続きが可能です。
 
 ```
+ちなみに、CLIで対話できるような実装は、AgentFrameworkに含まれてはいない認識です。対話CLIは独自実装です。
 
-### 🏗️ システム概要
+## システム概要
 
-**4つの専門エージェント** が **5つのMCPツール** を呼び出して協調動作します。
-
+**4つの専門エージェント** が **5つのMCPツール** を呼び出してエージェンティックな動作をするようにしています。
+さらに、4つの専門エージェントをツールとして呼び出す **OrchestratorAgent**（販売店エージェント的な存在）を用意し、ユーザはこのエージェントとだけ対話します。
 
 ```mermaid
 graph TB
@@ -140,68 +163,17 @@ graph TB
 
 ---
 
-## 2. Microsoft Agent Framework とは
+# Microsoft Agent Framework の主要なコンポーネント
+私はPythonを使っているので、PythonのAgentFrameworkのクラス名で解説します。
 
-### 2.1 Agent Framework の概要
+## ChatAgent（エージェント）
 
-**Microsoft Agent Framework** は、2024年後半にMicrosoftが公開した次世代のAIエージェント開発フレームワークです。**Python と .NET の両方で同じ概念・API設計を共有**している点が最大の特徴で、企業の既存システム（.NET）とAI/データ分析（Python）を統一的に扱えます。
-
-```mermaid
-graph TB
-    subgraph "Microsoft Agent Framework"
-        subgraph "Language Implementations"
-            DOTNET["Microsoft.Agents.AI<br/>.NET Implementation"]
-            PYTHON["agent-framework<br/>Python Implementation"]
-        end
-        
-        subgraph "AI Provider Integrations"
-            AZURE["Azure OpenAI<br/>AzureOpenAIClient"]
-            OPENAI["OpenAI<br/>OpenAIClient"]
-            COPILOT["Copilot Studio<br/>CopilotStudioClient"]
-        end
-        
-        subgraph "Core Capabilities"
-            AGENTS["AI Agents<br/>AIAgent, ChatAgent"]
-            WORKFLOWS["Workflows<br/>Graph Orchestration"]
-            TOOLS["Function Tools<br/>Function Calling, MCP"]
-        end
-        
-        subgraph "Development Support"
-            SAMPLES["Sample Projects<br/>70+ .NET, 30+ Python"]
-            DEVUI["DevUI<br/>Interactive Development"]
-            OBSERVABILITY["OpenTelemetry<br/>Distributed Tracing"]
-        end
-    end
-    
-    DOTNET --> AZURE
-    DOTNET --> OPENAI
-    PYTHON --> AZURE
-    PYTHON --> OPENAI
-    
-    DOTNET --> AGENTS
-    PYTHON --> AGENTS
-    
-    AGENTS --> WORKFLOWS
-    AGENTS --> TOOLS
-    
-    SAMPLES --> DOTNET
-    SAMPLES --> PYTHON
-    DEVUI --> PYTHON
-    OBSERVABILITY --> DOTNET
-    OBSERVABILITY --> PYTHON
-    
-    style AGENTS fill:#e1f5ff
-    style WORKFLOWS fill:#fff4e1
-    style TOOLS fill:#ffe1f5
-```
-
-### 2.2 主要コンポーネント
-
-#### �� ChatAgent - エージェントの中核
-
-**ChatAgent**（Python）/ **AIAgent**（.NET）は、LLMとツールを統合したエージェントの基本単位です。
-
-**基本的な作成パターン**:
+**ChatAgent**は、LLMとツールを統合したエージェントの基本単位です。
+**ChatAgent が持つ機能**はこれらです。
+- **Function Calling**: ツール関数を自動呼び出し
+- **Multi-turn Conversation**: Thread による会話履歴管理
+- **Streaming Response**: リアルタイム応答生成
+- **Structured Output**: Pydantic モデルで型安全な出力
 
 ```python
 from agent_framework import ChatAgent
@@ -212,60 +184,57 @@ from azure.identity.aio import DefaultAzureCredential
 async with DefaultAzureCredential() as credential:
     agent = AzureAIAgentClient(async_credential=credential).create_agent(
         name="HelperAgent",
-        instructions="You are a helpful assistant",
+        instructions="あなたは親切なアシスタントです。",
         tools=[get_weather]  # ツール関数を渡す
     )
-    
-    response = await agent.run("What's the weather in Tokyo?")
+
+    response = await agent.run("東京の天気はどうですか？")
     print(response.text)
 ```
 
-**ChatAgent が持つ機能**:
-- ✅ **Function Calling**: ツール関数を自動呼び出し
-- ✅ **Multi-turn Conversation**: Thread による会話履歴管理
-- ✅ **Streaming Response**: リアルタイム応答生成
-- ✅ **Structured Output**: Pydantic モデルで型安全な出力
-
-#### 🔧 Tools - 外部機能の統合
+## Tools（外部機能）
 
 エージェントが呼び出せる関数を **Tools** として登録します。
 
-**ツール定義の例**:
+ツールの種類はこれらがあります。今回の例ではMCP Toolsを使っています。
+| ツールタイプ | 説明 | 用途 |
+|-------------|------|------|
+| **Custom Functions** | Python 関数 | 独自ロジックの実装 |
+| **HostedCodeInterpreterTool** | コード実行環境 | データ分析・計算処理 |
+| **HostedFileSearchTool** | ファイル検索 | RAG（検索拡張生成） |
+| **MCP Tools** | Model Context Protocol | 外部サービス統合 |
+
+天気取得ツールを例としてツール定義の実装例は以下です。
 
 ```python
 from typing import Annotated
 from pydantic import Field
 
 def get_weather(
-    location: Annotated[str, Field(description="The location to get weather for")]
+    location: Annotated[str, Field(description="天気を取得する場所")],
 ) -> str:
-    """Get the weather for a given location."""
+    """天気を取得する場所の天気を返します。"""
     # Your weather API implementation here
-    return f"The weather in {location} is sunny with 25°C."
+    return f"{location}の天気は晴れで、気温は25°Cです。"
 
 # エージェントに登録
 agent = ChatAgent(
     chat_client=OpenAIChatClient(),
-    instructions="You are a helpful weather assistant.",
+    instructions="あなたは親切な天気アシスタントです。",
     tools=get_weather,  # ツールとして追加
 )
 
-result = await agent.run("What's the weather like in Tokyo?")
+result = await agent.run("東京の天気はどうですか？")
 print(result.text)
 ```
 
-**ツールの種類**:
-| ツールタイプ | 説明 | 用途 |
-|-------------|------|------|
-| **Custom Functions** | Python/C# 関数 | 独自ロジックの実装 |
-| **HostedCodeInterpreterTool** | コード実行環境 | データ分析・計算処理 |
-| **HostedFileSearchTool** | ファイル検索 | RAG（検索拡張生成） |
-| **MCP Tools** | Model Context Protocol | 外部サービス統合 |
-
-#### 🎯 Middleware - エージェント実行の制御
+## Middleware（エージェント実行の制御）
 
 **Middleware** は、エージェント実行の各段階でフック処理を挟める仕組みです。
 
+例えば、以下のような処理を挟み込めます。
+- **リクエスト前**: ロギング、PIIマスキング、ツールホワイトリスト
+- **レスポンス後**: 不適切な応答のフィルタリング
 ```mermaid
 graph LR
     INPUT[User Input] --> M1[Middleware 1<br/>Logging]
@@ -273,13 +242,9 @@ graph LR
     M2 --> AGENT[Agent Execution]
     AGENT --> M3[Middleware 3<br/>Response Filter]
     M3 --> OUTPUT[Response]
-    
-    style M1 fill:#e8f5e9
-    style M2 fill:#e8f5e9
-    style M3 fill:#e8f5e9
 ```
 
-**Middleware の実装例**:
+**Middleware の実装例**
 
 ```python
 from agent_framework import AgentRunContext
@@ -289,7 +254,7 @@ async def logging_agent_middleware(
     context: AgentRunContext,
     next: Callable[[AgentRunContext], Awaitable[None]],
 ) -> None:
-    """Simple middleware that logs agent execution."""
+    """エージェント実行をログ出力するミドルウェアの例"""
     print("Agent starting...")
     
     # Continue to agent execution
@@ -300,36 +265,23 @@ async def logging_agent_middleware(
 # Middleware を追加
 async with AzureAIAgentClient(async_credential=credential).create_agent(
     name="GreetingAgent",
-    instructions="You are a friendly greeting assistant.",
+    instructions="あなたは親切なアシスタントです。",
     middleware=logging_agent_middleware,  # ここで追加
 ) as agent:
     result = await agent.run("Hello!")
     print(result.text)
 ```
 
-**Middleware のユースケース**:
-- 🔒 **セキュリティ**: PII（個人情報）のマスキング、ツール呼び出しのホワイトリスト
-- 📊 **Observability**: トークン使用量、レイテンシの記録
-- 🛡️ **ガード**: 不適切な出力の検知と修正
-- 🔄 **Retry**: エラー時の自動リトライ
-
-#### 🌊 Workflow - マルチエージェントオーケストレーション
+## Workflow（マルチエージェントオーケストレーション）
 
 **Workflow** は、複数のエージェントや関数をグラフ構造で連携させる仕組みです。
 
-```mermaid
-graph TB
-    START[Start] --> AGENT_A[ResearcherAgent<br/>情報収集]
-    AGENT_A --> AGENT_B[CoderAgent<br/>データ分析]
-    AGENT_B --> DECISION{Results OK?}
-    DECISION -->|Yes| END[End]
-    DECISION -->|No| AGENT_A
-    
-    style AGENT_A fill:#e1f5ff
-    style AGENT_B fill:#fff4e1
-```
+ワークフローで定義できるので、**複雑な分岐やループも表現可能**です。実業務で決まった工程がある場合に有用だと思います。
+実例だと TOYOTA O-beya の思想ですね。
 
-**Workflow の種類**:
+https://devblogs.microsoft.com/cosmosdb/toyota-motor-corporation-innovates-design-development-with-multi-agent-ai-system-and-cosmos-db/」
+
+Workflow の種類にはこれらがあります。
 
 | パターン | 説明 | 図 |
 |---------|------|-----|
@@ -338,7 +290,19 @@ graph TB
 | **Handoff** | 条件分岐 | A → 判定 → B or C |
 | **Group Chat** | 協調対話 | A ↔ B ↔ C |
 
-**Workflow の実装例**:
+例えば以下のようなフローを定義できます。
+```mermaid
+graph TB
+    START[Start] --> AGENT_A[ResearcherAgent<br/>情報収集]
+    AGENT_A --> AGENT_B[CoderAgent<br/>データ分析]
+    AGENT_B --> DECISION{Results OK?}
+    DECISION -->|Yes| END[End]
+    DECISION -->|No| AGENT_A
+```
+
+Durable Functions みたいですね。Durable Functionsの場合は状態管理もされており、より堅牢なワークフローが実装できます。
+
+**Workflow の実装例**
 
 ```python
 from agent_framework.workflows import WorkflowBuilder
@@ -346,15 +310,15 @@ from agent_framework.workflows import WorkflowBuilder
 # エージェント作成
 researcher = ChatAgent(
     name="ResearcherAgent",
-    description="Specialist in research",
-    instructions="You find information without computation.",
+    description="調査を行うエージェント",
+    instructions="あなたはデータを調査し、分析結果を提供します。",
     chat_client=OpenAIChatClient()
 )
 
 coder = ChatAgent(
     name="CoderAgent",
-    description="Writes and executes code",
-    instructions="You solve questions using code.",
+    description="コードを書くエージェント",
+    instructions="あなたはコードを使って問題を解決します。",
     chat_client=OpenAIResponsesClient(),
     tools=HostedCodeInterpreterTool()
 )
@@ -365,16 +329,10 @@ builder.add_edge(researcher, coder)  # researcher → coder
 workflow = builder.build()
 
 # 実行
-result = await workflow.run("Analyze the weather data for Tokyo")
+result = await workflow.run("過去2年間の東京の天気データを分析してください。")
 ```
 
-**Workflow の高度な機能**:
-- ✅ **Checkpointing**: ワークフローの途中状態を保存・復元
-- ✅ **Human-in-the-Loop**: 人間の承認を待つノード
-- ✅ **Time-Travel**: 過去の状態に巻き戻して再実行
-- ✅ **Streaming**: リアルタイムで進捗イベントを配信
-
-#### 🧠 Memory - 会話状態の管理
+## Memory（会話状態の管理）
 
 **Memory** は、会話履歴やコンテキストを永続化する仕組みです。
 
@@ -382,19 +340,21 @@ result = await workflow.run("Analyze the weather data for Tokyo")
 # Thread による会話履歴管理
 agent = ChatAgent(
     chat_client=AzureAIAgentClient(async_credential=credential),
-    instructions="You are a helpful assistant."
+    instructions="あなたは親切なアシスタントです。"
 )
 
 # 新しいスレッド作成
 thread = agent.get_new_thread()
 
 # 同じスレッドで複数ターン実行
-response1 = await agent.run("My name is Alice", thread=thread)
-response2 = await agent.run("What's my name?", thread=thread)
-print(response2.text)  # "Your name is Alice"
+response1 = await agent.run("こんにちは", thread=thread)
+response2 = await agent.run("私の名前はしろくまです。", thread=thread)
+response3 = await agent.run("私の名前は何ですか？", thread=thread)
+print(response3.text)  # "あなたの名前はしろくまです。"
 ```
 
-**外部ストレージとの統合**:
+さらに、会話履歴を**外部ストレージと統合**できます。
+以下はRedisを使う場合の例です。
 
 ```python
 from agent_framework import ChatAgent
@@ -408,29 +368,10 @@ agent = ChatAgent(
     )
 )
 ```
+# Model Context Protocol (MCP) 
+もう知ってるよ！という方は読み飛ばしてください！！
 
-### 2.3 他のフレームワークとの違い
-
-| 観点 | Agent Framework | LangChain | Semantic Kernel |
-|------|-----------------|-----------|-----------------|
-| **言語サポート** | Python / .NET で概念統一 | Python中心 | .NET/Python（API差異あり） |
-| **マルチターン** | Thread による会話状態管理 | ConversationBufferMemory | ChatHistory（手動管理） |
-| **ツール統合** | MCP標準対応 | Tools抽象（カスタム実装） | Plugins/Functions |
-| **ミドルウェア** | リクエスト/レスポンス/承認フック | Callback Handler | Filter（限定的） |
-| **Workflow** | グラフ型 + Checkpoint + HITL | LangGraph（別パッケージ） | Planner（限定的） |
-| **Observability** | OpenTelemetry 標準統合 | コミュニティ拡張 | 拡張で実現 |
-
-**Agent Framework が優れている点**:
-- ✅ **統一API**: Python と .NET で同じ概念・パターン
-- ✅ **エンタープライズ対応**: Middleware、Checkpoint、Observability が標準装備
-- ✅ **MCP対応**: 外部ツールの標準プロトコル対応
-- ✅ **柔軟なWorkflow**: グラフ型で複雑な分岐・並列処理が可能
-
----
-
-## 3. Model Context Protocol (MCP) とは
-
-### 3.1 MCP の概要
+## MCP の概要
 
 **Model Context Protocol (MCP)** は、AIエージェントと外部ツールを接続する**標準プロトコル**です。Anthropicが2024年11月に発表しました。
 
@@ -447,9 +388,7 @@ graph LR
     style MCP_SERVER fill:#fff4e1
 ```
 
-### 3.2 MCP の仕組み
-
-**通信フロー**:
+MCPによるツール処理は以下のように行われます。
 
 ```
 1. Agent → MCP Client: "VehicleModels ツールを呼び出したい"
@@ -464,20 +403,19 @@ graph LR
 6. MCP Client → Agent: ツール結果を返す
 ```
 
-### 3.3 MCP のメリット
+## Azure Functions の MCPサーバ化
+Azure Functions で、MCPサーバーを簡単に構築できます。さらに最近、Streamable HTTPもサポートされました。うれしいですね。
 
-| メリット | 説明 | 具体例 |
-|---------|------|--------|
-| **Tool Discovery** | ツール一覧とスキーマを動的取得 | `/mcp/discover` で全ツールの仕様を取得 |
-| **標準化** | エージェント側の実装がツールに依存しない | Azure Functions → AWS Lambda へ移行しても Agent 側は変更不要 |
-| **セキュリティ** | ツール実行の承認フローを組み込める | `require_approval=True` で人間承認必須化 |
-| **拡張性** | 新しいツールを追加してもエージェント側は変更不要 | 5つ目のツールを追加してもエージェントコードは不変 |
+::: message
+新しいプロトコル バージョンでは、Server-Sent イベント トランスポートが非推奨になりました。 クライアントで特に要求されない限り、代わりに Streamable HTTP トランスポートを使用する必要があります。
+:::
 
-### 3.4 Azure Functions の generic_trigger
+**実装例**です。従来のHTTPトリガーなどのデコレーターの代わりに、`generic_trigger` デコレーターを使います。
 
-Azure Functions v2 の **generic_trigger** は、MCPプロトコルを**ネイティブサポート**する新機能です。
-
-**定義例**:
+- `type="mcpToolTrigger"` で MCP プロトコル対応
+- `toolProperties` で入力スキーマを定義
+- `context` は JSON文字列（`arguments` キーにパラメータ）
+- 戻り値も JSON 文字列
 
 ```python
 @app.generic_trigger(
@@ -494,109 +432,9 @@ def vehicle_models_get_mcp(context) -> str:
     return json.dumps(result)                 # JSON文字列で返す
 ```
 
-**ポイント**:
-- `type="mcpToolTrigger"` で MCP プロトコル対応
-- `toolProperties` で入力スキーマを定義
-- `context` は JSON文字列（`arguments` キーにパラメータ）
-- 戻り値も JSON 文字列
-
 ---
 
-## 4. なぜこの構成を選んだか（技術選定理由）
-
-### 4.1 Agent Framework を選んだ理由
-
-✅ **マルチエージェント + MCP標準対応**
-- 複数の専門エージェント（Proposal/Quotation/Finance）を統括する Orchestrator パターンが簡単に実装できる
-- MCP ツールを `tools=[...]` で渡すだけで統合完了
-
-✅ **Observability 内蔵**
-- OpenTelemetry が標準統合されており、トレーシング・メトリクス収集が容易
-- 「どのツールで遅延が発生しているか」を即座に特定可能
-
-✅ **Middleware で横断的関心事を実装**
-- PII マスキング、ツールホワイトリスト、リトライ処理を**後付けでなく設計時に組み込める**
-- 実運用時のセキュリティ・品質要件を満たしやすい
-
-✅ **HITL（Human-in-the-Loop）対応**
-- Workflow の Checkpoint 機能で、与信審査の境界スコア時に人間承認にエスカレーション可能
-- 金融系業務の要件を満たせる
-
-### 4.2 Azure Functions を選んだ理由
-
-✅ **サーバーレスで簡単にMCPツールを公開**
-- `generic_trigger` デコレータだけで MCP プロトコル対応ツールを作成可能
-- インフラ管理不要で開発に集中できる
-
-✅ **スケーラビリティ**
-- トラフィック増加時に自動スケール
-- 従量課金で月100万リクエストまで無料枠あり
-
-✅ **Azure エコシステムとの統合**
-- Azure OpenAI、Cosmos DB、Application Insights と同一テナント内で統合可能
-- 認証は Azure CLI Credential で統一
-
-### 4.3 Python を選んだ理由
-
-✅ **AI/データ周りのエコシステムが充実**
-- Pydantic でスキーマ定義、Pandas でデータ処理、NumPy で数値計算
-
-✅ **Agent Framework の Python 実装が成熟**
-- サンプルコードが豊富（30+ Python samples）
-- DevUI（対話的開発環境）が Python 対応
-
-✅ **開発速度**
-- 型ヒント + async/await で可読性高く、PoC を素早く実装可能
-
-### 4.4 想定する実運用シナリオ
-
-**初期フェーズ（PoC → Pilot）**:
-- 自動車ディーラーのWebサイトにチャットボット埋め込み
-- 在庫・納期・価格はモックデータで動作確認
-
-**本番フェーズ（Production）**:
-- 在庫・納期は既存DBからリアルタイム取得（Azure SQL / Cosmos DB）
-- 与信審査は境界スコアで人間承認にエスカレーション（HITL）
-- Application Insights でトークン使用量・レイテンシを監視
-- A/B テストで Prompt バリエーションを評価
-
----
-
----|-----------------|-----------|-----------------|
-| 言語 | Python / .NET で概念統一 | Python中心 | .NET/Python（API差異あり） |
-| マルチターン | Thread による会話状態管理 | ConversationBufferMemory | ChatHistory（手動管理） |
-| ツール統合 | MCP標準対応 | Tools抽象（カスタム実装） | Plugins/Functions |
-| ミドルウェア | リクエスト/レスポンス/承認フック | Callback Handler | Filter（限定的） |
-
-### 2.2 MCP (Model Context Protocol) とは
-
-**AIエージェントと外部ツールを接続する標準プロトコル**です。Anthropicが2024年11月に発表しました。
-
-**MCPの仕組み**:
-```
-Agent → MCP Client → [HTTP/WebSocket] → MCP Server → Tool Implementation
-```
-
-**メリット**:
-1. **Tool Discovery**: ツール一覧とスキーマを動的に取得可能
-2. **標準化**: エージェント側の実装がツールに依存しない
-3. **セキュリティ**: ツール実行の承認フローを組み込める
-4. **拡張性**: 新しいツールを追加してもエージェント側は変更不要
-
-### 2.3 なぜこの構成にしたか
-
-**選定理由**:
-- ✅ **Agent Framework**: マルチエージェント + MCP標準対応 + Observability内蔵
-- ✅ **Azure Functions**: サーバーレスで簡単にMCPツールを公開できる
-- ✅ **generic_trigger**: Azure Functions v2の新機能でMCPプロトコルを直接サポート
-- ✅ **Python**: データ処理とAI周りのエコシステムが充実
-
-**想定する実運用シナリオ**:
-- 自動車ディーラーのWebサイトにチャットボット埋め込み
-- 在庫・納期・価格はリアルタイムに既存DBから取得
-- 与信審査は境界スコアで人間承認にエスカレーション（HITL）
-
----
+ここからは、実際の実装内容を紹介します。
 
 ## 5. 実装：MCPツールサーバの構築（Azure Functions）
 
